@@ -1,0 +1,11 @@
+--- bind.c
++++ bind.c
+@@ -15,7 +15,7 @@
+ #include <exec/types.h>
+ #include <exec/memory.h>
+ #include <exec/execbase.h>
+-#include <exec/execname.h>
++/* #include <exec/execname.h> */	/* not in modern NDK; unused here */
+ #include <exec/libraries.h>
+ #include <stdio.h>
+ #pragma pack(4)

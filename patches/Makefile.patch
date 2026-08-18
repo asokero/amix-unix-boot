@@ -1,0 +1,28 @@
+--- Makefile
++++ Makefile
+@@ -6,3 +6,12 @@
+ AS = $(CC)
+-CFLAGS = -O2 -fomit-frame-pointer -Iinclude -DSUPERKICKSTART_KLUDGE
++# CRT: the loader uses POSIX open/read/close/stat.  bebbo amiga-gcc's DEFAULT
++# libc is newlib, which lacks those bare wrappers -> link fails.  clib2 provides
++# them (this is what the original working build linked against).  Must be passed
++# at BOTH compile (header selection) and link (libc/crt0 selection).
++CRT = -mcrt=clib2
++# -m68030: copyit.s uses pmove (needs 68020+ to assemble).  Resulting code is
++# 68020+ and assembles for 030/040/060; only 040 and 060 actually boot (see README).
++# The 030-only pmove path and the .word-encoded
++# 040 ops are runtime-gated by AttnFlags.  Also selects the clib2 libm020 multilib.
++CFLAGS = -O2 -fomit-frame-pointer -Iinclude -DSUPERKICKSTART_KLUDGE -m68030 $(CRT)
+ 
+@@ -11,3 +20,10 @@
+ unix_boot: $(OBJ)
+-	$(CC) $(OBJ) -o unix_boot
++	$(CC) $(CRT) $(OBJ) -o unix_boot
++
++# Explicit suffix rules: the built-in rules link (.s/.c without -c) and fail.
++.SUFFIXES: .c .s .o
++.c.o:
++	$(CC) $(CFLAGS) -c $<
++.s.o:
++	$(CC) $(CFLAGS) -c $<
+ 

@@ -1,0 +1,13 @@
+# This repository ships patches only.  The loader is Markus Wild's (Aminet misc/unix/unix_boot)
+# and the files inside it carry Commodore's 1991 copyright; neither is ours to redistribute.
+src/
+bin/
+.extract/
+*.lha
+*.o
+unix_boot
+
+# Local build/run area: extracted sources, build output, and third-party binaries such as
+# arp.library -- which the ORIGINAL prebuilt loader needs and what we build does not, but which
+# is not ours to ship either way.
+local-worktree/

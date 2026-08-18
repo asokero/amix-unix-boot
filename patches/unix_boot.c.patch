@@ -1,0 +1,373 @@
+--- unix_boot.c
++++ unix_boot.c
+@@ -32,3 +32,7 @@
+ 
+-#include <inline/exec.h>
++#include <proto/exec.h>		/* declares SysBase + exec inlines (modern NDK) */
++#include <proto/expansion.h>	/* FindConfigDev + ExpansionBase global */
++#include <proto/dos.h>		/* Input()/WaitForChar() for the timed pause (2026-07-14) */
++#include <string.h>		/* strerror */
++#include <stdarg.h>		/* dprintf serial mirror (2026-07-14) */
+ 
+@@ -43,2 +47,7 @@
+ 
++/* clib2 does not auto-define library bases; provide storage for the
++   expansion.library base used by FindConfigDev() (opened in main()).
++   Type must match <proto/expansion.h>: struct ExpansionBase *. */
++struct ExpansionBase *ExpansionBase = NULL;
++
+ /* I like even numbers ;-) */
+@@ -58,2 +67,69 @@
+ 
++/*
++ *  Serial mirror (2026-07-14): the loader's diagnostics used to be screen-only,
++ *  i.e. photo-only on real HW and screenshot-only on the emulator (the console
++ *  wraps at ~40 lines).  Mirror every diagnostic line to the custom-chip serial
++ *  port -- the SAME registers and 9600 baud as the kernel's serdbg.s conputc
++ *  hook, so one capture (Amiberry TCP:1234 / a future real serial cable) holds
++ *  the loader AND kernel output.  Direct SERDAT banging: no serial.device
++ *  dependency, interrupt-free, safe right up to the supervisor() handoff.
++ */
++#define CUSTOM_SERPER  (*(volatile unsigned short *)0xDFF032)
++#define CUSTOM_SERDAT  (*(volatile unsigned short *)0xDFF030)
++#define CUSTOM_SERDATR (*(volatile unsigned short *)0xDFF018)
++
++static int ser_up = 0;
++
++static void
++ser_putc (c)
++int c;
++{
++    long guard;
++
++    if (!ser_up) {
++	CUSTOM_SERPER = 0x0174;			/* 9600 baud (PAL clock) */
++	ser_up = 1;
++    }
++    CUSTOM_SERDAT = 0x0100 | (c & 0xff);	/* STOPBIT | char */
++    for (guard = 0x10000; guard > 0; guard--)	/* bounded TBE wait */
++	if (CUSTOM_SERDATR & 0x2000)
++	    break;
++}
++
++static void
++ser_puts (s)
++const char *s;
++{
++    while (*s) {
++	if (*s == '\n')
++	    ser_putc ('\r');
++	ser_putc (*s++);
++    }
++}
++
++/*
++ *  dprintf: fprintf(stderr, ...) replacement that also mirrors to serial.
++ *  All diagnostic lines here are short; 512 bytes is ample.
++ *
++ *  __stdargs is MANDATORY (2026-07-15): bebbo amiga-gcc defaults to a regargs
++ *  ABI in which the first few arguments come in registers.  A custom variadic
++ *  function without __stdargs makes va_start() compute the wrong stack origin,
++ *  so vsnprintf() reads garbage for the varargs (observed: the multi-%d
++ *  AttnFlags line printed junk while shorter lines happened to survive).
++ *  Forcing __stdargs puts every argument on the stack, matching clib2's own
++ *  __stdargs vsnprintf and the classic printf ABI va_start expects.
++ */
++static void __stdargs
++dprintf (const char *fmt, ...)
++{
++    char buf[512];
++    va_list ap;
++
++    va_start (ap, fmt);
++    vsnprintf (buf, sizeof (buf), fmt, ap);
++    va_end (ap);
++    fputs (buf, stderr);
++    ser_puts (buf);
++}
++
+ struct copyinfo {
+@@ -65,2 +141,6 @@
+     unsigned long ci_d1;
++    unsigned long ci_cksum;	/* DIAG 2026-07-09: additive sum of the image,
++				   recomputed by copyit over the DEST after the
++				   copy; mismatch -> copyit flashes color0 forever
++				   instead of jumping into a corrupt kernel. */
+     unsigned long ci_copyit[1];	/* Code gets copied here */
+@@ -75,3 +155,3 @@
+     unsigned long filebase;		/* Offset of kernel on boot dev */
+-    struct ExpansionBase *ExpansionBase;
++    /* ExpansionBase is the library base global from <proto/expansion.h> */
+     struct bootinfo *bi;
+@@ -92,4 +172,23 @@
+     struct stat stb;
++    int wait_forever = 0;
++
++    /*
++     *  -w (2026-07-14): wait FOREVER for RETURN at the pre-handoff diagnostic
++     *  pause (the old behaviour -- for real-HW photo debugging).  The default
++     *  is now a 10 s timeout so unattended/emulator boots proceed by
++     *  themselves; the same diagnostics also go to serial (see dprintf).
++     */
++    {
++	int i, j;
++	for (i = 1; i < argc; ) {
++	    if (strcmp (argv[i], "-w") == 0) {
++		wait_forever = 1;
++		for (j = i; j < argc - 1; j++)
++		    argv[j] = argv[j + 1];
++		argc--;
++	    } else
++		i++;
++	}
++    }
+ 
+-    
+     switch (argc)
+@@ -114,3 +213,3 @@
+       default:
+-        fprintf (stderr, "%s [kernel_file [bind_address]]\n", argv[0]);
++        dprintf ("%s [kernel_file [bind_address]]\n", argv[0]);
+         return 20;
+@@ -120,3 +219,3 @@
+       {
+-        fprintf (stderr, "%s: can't access %s, %s.\n",
++        dprintf ("%s: can't access %s, %s.\n",
+         	 argv[0], kernel_name, strerror (errno));
+@@ -127,3 +226,3 @@
+       {
+-        fprintf (stderr, "%s: can't bind into CHIP memory.\n", argv[0]);
++        dprintf ("%s: can't bind into CHIP memory.\n", argv[0]);
+         return 20;
+@@ -132,7 +231,6 @@
+ 
+-    ExpansionBase = (struct ExpansionBase *) 
+-		    OpenLibrary (reloc (EXPANSIONNAME), 0);
+-    if (ExpansionBase == NULL) 
++    ExpansionBase = (struct ExpansionBase *) OpenLibrary (reloc (EXPANSIONNAME), 0);
++    if (ExpansionBase == NULL)
+       {
+-	fprintf (stderr, "%s: can't open expansion.library.\n", argv[0]);
++	dprintf ("%s: can't open expansion.library.\n", argv[0]);
+ 	return 20;
+@@ -150,5 +248,13 @@
+     /*
+-     * Open the kernel file, and read it into a large enough buffer
++     * Open the kernel file, and read it into a large enough buffer.
++     *
++     * MEMF_REVERSE (2026-07-09, V36+): allocate the buffer from the TOP of
++     * fast RAM.  Plain MEMF_FAST placed it low -- on a cold boot ~0.94MB above
++     * the fast-RAM base, where the relocated ~0.96MB image OVERLAPPED the copy
++     * destination [bindaddr, bindaddr+size) by ~25KB and copyit corrupted the
++     * kernel head in transit (the cold-boot flakiness; the ed/dir "warm-up"
++     * merely pushed this buffer past the overlap).  copyit's copy is now
++     * overlap-safe too, but not overlapping at all is strictly better.
+      */
+-    kernel_image = AllocMem (stb.st_size, MEMF_FAST);
++    kernel_image = AllocMem (stb.st_size, MEMF_FAST | MEMF_REVERSE);
+     if (! kernel_image)
+@@ -157,3 +263,3 @@
+ 	FreeMem (chip_buf, CHIP_BUF_SIZE);
+-        fprintf (stderr, "%s: out of memory loading kernel.\n", argv[0]);
++        dprintf ("%s: out of memory loading kernel.\n", argv[0]);
+         return 20;
+@@ -163,3 +269,3 @@
+       {
+-	fprintf (stderr, "%s: can't open %s for read access, %s\n",        
++	dprintf ("%s: can't open %s for read access, %s\n",        
+ 		 argv[0], kernel_name, strerror (errno));
+@@ -174,3 +280,3 @@
+       {
+-        fprintf (stderr, "%s: can't read %s, %s.\n",
++        dprintf ("%s: can't read %s, %s.\n",
+         	 argv[0], kernel_name, strerror (errno));
+@@ -189,5 +295,15 @@
+     acp = bi -> autocon;
+-    for (cdp = (struct ConfigDev *) ExpansionBase -> BoardList.lh_Head ;
+-	 cdp -> cd_Node.ln_Succ ;
+-	 cdp = (struct ConfigDev *) cdp -> cd_Node.ln_Succ) {
++    /* Walk the configured boards via the public API (BoardList is no longer a
++       public ExpansionBase member in the modern NDK).  Matches boot2.c. */
++    for (cdp = FindConfigDev (NULL, -1L, -1L) ;
++	 cdp != NULL ;
++	 cdp = FindConfigDev (cdp, -1L, -1L)) {
++	/*  bootinfo.memory[] follows autocon[] immediately, so overrunning NAUTO here does
++	 *  not lose a board: it silently overwrites the memory regions the kernel is about
++	 *  to be handed.  Refuse to boot instead (2026-08-18). */
++	if (acp - bi -> autocon >= NAUTO) {
++	    dprintf ("%s: more than %d AutoConfig boards, bootinfo is full.\n",
++		     argv[0], NAUTO);
++	    goto shutup;
++	}
+ 	*acp++ = *cdp;
+@@ -200,2 +316,7 @@
+       {
++	if (mhp - bi -> memory >= NAUTO) {
++	    dprintf ("%s: more than %d memory regions, bootinfo is full.\n",
++		     argv[0], NAUTO);
++	    goto shutup;
++	}
+ 	*mhp = *mnp;
+@@ -231,3 +352,3 @@
+ 	|| (bd -> bd_tvaddr + bd -> bd_tsize != bd -> bd_dvaddr)) {
+-	fprintf (stderr, "%s: Text and data not contiguous!\n",
++	dprintf ("%s: Text and data not contiguous!\n",
+ 		 argv[0]);
+@@ -237,2 +358,22 @@
+     /*
++     *  060-B (2026-07-10): tell the kernel which CPU it boots on.  The kernel's
++     *  `cputype` global (default 40, see the kernel port's src/cputype060.s)
++     *  drives its runtime 040/060 dispatch (ptest software walk on the 060,
++     *  " 68040-"/" 68060-" banner + uname tag).  Poke it via the ELF symtab
++     *  NOW -- i.e. before the image checksum below is computed.  A kernel
++     *  without the symbol (pre-060 build) is left untouched and behaves as
++     *  before, so failure here is informational only.
++     */
++    {
++	unsigned short af0 = (*ABSEXECBASE) -> AttnFlags;
++	unsigned long cput = (af0 & (1 << 7)) ? 60 : 40;	/* AFB_68060 */
++	extern int pokesymlong (char *elfdata, char *name, unsigned long value);
++
++	if (pokesymlong ((char *) kernel_image, "cputype", cput))
++	    dprintf ("kernel cputype set to %lu\n", cput);
++	else
++	    dprintf ("kernel has no cputype symbol (pre-060 build) -- left as-is\n");
++    }
++
++    /*
+      *	Initialize the copyinfo structure, copy the code for the copyit
+@@ -242,2 +383,113 @@
+ 
++    /*
++     *  DIAGNOSTIC (2026): copyit selects its MMU-disable path from
++     *  SysBase->AttnFlags.  On a 68040 the F010/pmove path must NOT run.
++     *  Print the flags so we can see what the CPU detection actually yields
++     *  in this environment before handing off to supervisor mode.
++     */
++    {
++	unsigned long af = (unsigned long) (*ABSEXECBASE) -> AttnFlags;
++	/*
++	 *  Print the raw AttnFlags word only, as a single %08lx arg (2026-07-15).
++	 *  A previous version printed a 0x%04x + seven %d per-bit breakdown in one
++	 *  call and rendered TOTAL garbage on this bebbo/clib2 target -- the whole
++	 *  multi-vararg line was mangled (even the leading %04x disagreed with the
++	 *  correct C-level bit tests below), while single/unsigned-long-arg lines
++	 *  (cputype, checksum, board dump) print fine.  Rather than fight the
++	 *  varargs path, keep this to one reliable %08lx: the raw word carries
++	 *  every bit, and the decisive movec-vs-pmove choice is its own line.
++	 *  AttnFlags bits: 1=020 2=030 3=040 4=68881 5=68882 6=FPU40 7=68060.
++	 */
++	dprintf ("AttnFlags = 0x%08lx\n", af);
++	if (af & (1UL << 3))
++	    dprintf ("  -> copyit will take the 68040/060 (movec) path.\n");
++	else
++	    dprintf ("  -> copyit will take the 68030 (pmove) path"
++			     " -- ILLEGAL on a real 040/060!\n");
++    }
++
++    /*
++     *  DIAGNOSTIC (2026): dump the bootinfo we are about to hand the kernel.
++     *  Our unix_boot now builds bi->autocon[] via FindConfigDev() (was a raw
++     *  ExpansionBase->BoardList walk) and uses the modern NDK headers.  If that
++     *  yields the wrong board list / struct layout, the kernel faults early in
++     *  config() -- which matches the 030 guru 8000 0038 seen with ALL kernels.
++     *  acp/mhp still point one past the last entry filled by the loops above.
++     *  Expected on solon: 4 boards (A2065 0202:70, Prelude 4231:01,
++     *  VA2000 6D6E:01, A2088 0201:01).
++     */
++    {
++	int nboards = (int) (acp - bi -> autocon);
++	int nmem    = (int) (mhp - bi -> memory);
++	int i;
++
++	dprintf ("bootinfo @ %08lx: %d board(s), %d mem region(s)\n",
++		 (unsigned long) bi, nboards, nmem);
++	for (i = 0; i < nboards; i++)
++	    dprintf (
++		"  board[%d] mfg=%04x prod=%02x addr=%08lx size=%08lx\n",
++		i,
++		(unsigned) bi -> autocon[i].cd_Rom.er_Manufacturer,
++		(unsigned) (bi -> autocon[i].cd_Rom.er_Product & 0xff),
++		(unsigned long) bi -> autocon[i].cd_BoardAddr,
++		(unsigned long) bi -> autocon[i].cd_BoardSize);
++	for (i = 0; i < nmem; i++)
++	    dprintf (
++		"  mem[%d] lower=%08lx upper=%08lx attr=%04x\n",
++		i,
++		(unsigned long) bi -> memory[i].mh_Lower,
++		(unsigned long) bi -> memory[i].mh_Upper,
++		(unsigned) bi -> memory[i].mh_Attributes);
++	dprintf (
++	    "kernel: entry=%08lx tvaddr=%08lx tsize=%08lx dvaddr=%08lx dsize=%08lx\n",
++	    (unsigned long) bd -> bd_entry,
++	    (unsigned long) bd -> bd_tvaddr,
++	    (unsigned long) bd -> bd_tsize,
++	    (unsigned long) bd -> bd_dvaddr,
++	    (unsigned long) bd -> bd_dsize);
++	dprintf ("        toffset=%08lx doffset=%08lx\n",
++	    (unsigned long) bd -> bd_toffset,
++	    (unsigned long) bd -> bd_doffset);
++
++	/*
++	 *  DIAGNOSTIC (2026-07-09): cold-boot flakiness hunt.  copyit does NOT
++	 *  handle a source/destination overlap correctly (its direction choice
++	 *  is inverted for the overlapping case: dest<src copies descending,
++	 *  dest>src ascending -- both clobber unread source bytes), and nothing
++	 *  here ever checked for overlap.  AllocMem(MEMF_FAST) placement varies
++	 *  with prior AmigaOS activity, which is exactly what the ed/dir warm-up
++	 *  changes.  Print where the ELF buffer sits relative to the copy
++	 *  destination so cold vs. warmed-up boots can be compared.
++	 */
++	{
++	    unsigned long src_lo = (unsigned long) kernel_image + bd -> bd_toffset;
++	    unsigned long src_hi = src_lo + bd -> bd_tsize + bd -> bd_dsize;
++	    unsigned long dst_lo = bd -> bd_tvaddr;
++	    unsigned long dst_hi = dst_lo + bd -> bd_tsize + bd -> bd_dsize;
++	    dprintf (
++		"buffer: image=%08lx copysrc=%08lx..%08lx dest=%08lx..%08lx\n",
++		(unsigned long) kernel_image, src_lo, src_hi, dst_lo, dst_hi);
++	    if (src_lo < dst_hi && dst_lo < src_hi)
++		dprintf (
++		    "*** OVERLAP: copyit WILL corrupt the kernel image! ***\n");
++	    else
++		dprintf ("no overlap (copy is safe)\n");
++	}
++	if (wait_forever) {
++	    dprintf ("[-w: press RETURN to continue to supervisor()/copyit]\n");
++	    { char _c; read (0, &_c, 1); }
++	} else {
++	    /*
++	     *  Timed pause (2026-07-14): RETURN within 10 s holds the old
++	     *  interactive behaviour; otherwise continue unattended (the
++	     *  emulator test cycle must never block on a keypress).
++	     */
++	    dprintf ("[RETURN to continue now; auto-continue in 10 s; -w waits forever]\n");
++	    if (WaitForChar (Input (), 10 * 1000000L)) {
++		char _c;
++		read (0, &_c, 1);
++	    }
++	}
++    }
++
+     copyinfo = (struct copyinfo *) chip_buf;
+@@ -249,2 +501,20 @@
+     copyinfo -> ci_d1      = (unsigned long) bi;	/* bootinfo struct */
++
++    /*
++     *  DIAG (2026-07-09): checksum the relocated image NOW (after all loader
++     *  activity, right before the handoff).  copyit recomputes this over the
++     *  copy DESTINATION after the copy and refuses to jump into a mismatching
++     *  (= corrupted-in-transit) kernel -- it flashes the display instead.
++     *  Both sides sum (size >> 2) longwords, wrapping 32-bit adds.
++     */
++    {
++	unsigned long sum = 0;
++	unsigned long *p = (unsigned long *) (kernel_image + bd -> bd_toffset);
++	unsigned long n = copyinfo -> ci_size >> 2;
++	while (n--)
++	    sum += *p++;
++	copyinfo -> ci_cksum = sum;
++	dprintf ("image checksum = %08lx (%lu longs)\n",
++		 sum, copyinfo -> ci_size >> 2);
++    }
+     memcpy (copyinfo -> ci_copyit, reloc (copyit), TD_SECTOR);

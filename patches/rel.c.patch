@@ -1,0 +1,134 @@
+--- rel.c
++++ rel.c
+@@ -41,7 +41,7 @@
+ #include <sys/elf_68K.h>
+ 
+ #include <exec/types.h>
+-#include <inline/exec.h>
++#include <proto/exec.h>		/* declares SysBase + exec inlines (modern NDK) */
+ 
+ #include "bootdata.h"
+ 
+@@ -50,7 +50,7 @@
+ #  define RELOC(string)		string
+ #else
+ #  include <exec/alerts.h>
+-#  define COMPLAIN(fmt,arg)	Alert(0x52454C41|AT_DeadEnd,0x4)
++#  define COMPLAIN(fmt,arg)	Alert(0x52454C41|AT_DeadEnd)	/* V36+ Alert takes 1 arg */
+ #  define RELOC(string)		reloc(string)
+ #endif
+ 
+@@ -117,6 +117,7 @@
+     unsigned int nrel;
+     int reltype;
+     unsigned int symidx;
++    long pcrel;			/* PC-relative displacement: S + A - P */
+ 
+     
+     DBUG_ENTER ("relocsection");
+@@ -136,6 +137,41 @@
+ 		*(long *)datap = vaddr + relp -> r_addend;
+ 		DBUG_PRINT ("reloc", ("reloc to %#lx", *(long *)datap));
+ 		break;
++	    /*
++	     * PC-relative relocations (S + A - P, where P is the RUNTIME address
++	     * of the relocation site = this section's bound vaddr + r_offset).
++	     * The stock loader handled only R_68K_32, so any object assembled by
++	     * the GNU m68k toolchain -- which keeps cross-file bsr/bra/lea PC-rel
++	     * references as relocations through `ld -r` -- was rejected with the
++	     * "RELA" dead-end Alert (0x52454C41|AT_DeadEnd = Guru D245 4C41).
++	     * That is what blocked linking the Motorola 040 FPSP (330 PC-rel
++	     * records) into the kernel.  Out-of-range displacements still
++	     * COMPLAIN, so a truncation can never be silent.
++	     */
++	    case R_68K_PC32:
++		pcrel = (long) (vaddr + relp -> r_addend)
++			- (long) (relsechdr -> sh_addr + relp -> r_offset);
++		*(long *)datap = pcrel;
++		DBUG_PRINT ("reloc", ("pcrel32 %#lx", pcrel));
++		break;
++	    case R_68K_PC16:
++		pcrel = (long) (vaddr + relp -> r_addend)
++			- (long) (relsechdr -> sh_addr + relp -> r_offset);
++		if (pcrel < -32768L || pcrel > 32767L) {
++		    COMPLAIN ("PC16 relocation out of range: %ld\n", pcrel);
++		}
++		*(short *)datap = (short) pcrel;
++		DBUG_PRINT ("reloc", ("pcrel16 %#lx", pcrel));
++		break;
++	    case R_68K_PC8:
++		pcrel = (long) (vaddr + relp -> r_addend)
++			- (long) (relsechdr -> sh_addr + relp -> r_offset);
++		if (pcrel < -128L || pcrel > 127L) {
++		    COMPLAIN ("PC8 relocation out of range: %ld\n", pcrel);
++		}
++		*(char *)datap = (char) pcrel;
++		DBUG_PRINT ("reloc", ("pcrel8 %#lx", pcrel));
++		break;
+ 	    default:
+ 		COMPLAIN ("unknown relocation type %d\n", reltype);
+ 		break;
+@@ -432,3 +468,63 @@
+     DBUG_RETURN (rtnval);
+ }
+ 
++/*
++ *	pokesymlong -- 060-B (2026-07-10): write a 32-bit value into the loaded
++ *	ELF image at the file location of a named data symbol.  unix_boot uses
++ *	this to set the kernel's `cputype` global (40/60, decided from
++ *	SysBase->AttnFlags) after relocation, so ONE kernel binary serves both
++ *	the 68040 and the 68060.
++ *
++ *	ET_REL kernels only (ours): a symbol's st_value is section-relative and
++ *	the section's sh_offset locates its bytes in the buffer.  Returns 1 on
++ *	success, 0 when the symtab or the symbol is absent or has no file bytes
++ *	-- an older kernel without `cputype` simply boots with its built-in
++ *	default, so the caller treats 0 as harmless.
++ */
++
++int pokesymlong (char *elfdata, char *name, unsigned long value)
++{
++    Elf32_Ehdr *ehdr;
++    Elf32_Shdr *shdrs;
++    Elf32_Shdr *symhdr = NULL;
++    Elf32_Shdr *strtabhdr;
++    Elf32_Shdr *deshdr;
++    Elf32_Sym *syms;
++    Elf32_Sym *sym;
++    char *strtab;
++    unsigned int nsyms;
++    unsigned int symidx;
++    unsigned int sectnum;
++
++    ehdr = (Elf32_Ehdr *) elfdata;
++    if (!streqn ((char *) (ehdr -> e_ident), RELOC (ELFMAG), SELFMAG))
++	return 0;
++    if (ehdr -> e_type != ET_REL)
++	return 0;
++    shdrs = (Elf32_Shdr *) (elfdata + ehdr -> e_shoff);
++    for (sectnum = 0; sectnum < ehdr -> e_shnum; sectnum++) {
++	if (shdrs[sectnum].sh_type == SHT_SYMTAB) {
++	    symhdr = shdrs + sectnum;
++	}
++    }
++    if (symhdr == NULL || symhdr -> sh_entsize == 0)
++	return 0;
++    nsyms = symhdr -> sh_size / symhdr -> sh_entsize;
++    syms = (Elf32_Sym *) (elfdata + symhdr -> sh_offset);
++    strtabhdr = shdrs + symhdr -> sh_link;
++    strtab = elfdata + strtabhdr -> sh_offset;
++    for (symidx = 0; symidx < nsyms; symidx++) {
++	sym = syms + symidx;
++	if (sym -> st_name && streq (strtab + sym -> st_name, name)) {
++	    if (sym -> st_shndx == 0 || sym -> st_shndx >= ehdr -> e_shnum)
++		continue;			/* undefined/ABS: keep looking */
++	    deshdr = shdrs + sym -> st_shndx;
++	    if (deshdr -> sh_type != SHT_PROGBITS)
++		return 0;			/* .bss symbol: no file bytes to poke */
++	    *(unsigned long *) (elfdata + deshdr -> sh_offset + sym -> st_value) = value;
++	    return 1;
++	}
++    }
++    return 0;
++}
++

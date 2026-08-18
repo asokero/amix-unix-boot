@@ -1,0 +1,100 @@
+NOTICE
+======
+
+What is in this repository
+--------------------------
+Patches and build scripts written for this project.  They are MIT-licensed; see LICENSE.
+
+What is NOT in this repository, and why
+---------------------------------------
+The Amiga UNIX bootstrap `unix_boot` is **Markus Wild's** program, published on Aminet as
+`misc/unix/unix_boot` version 1.1c.  It is not a Commodore product.  It is, however, derived from
+Commodore's AMIX boot sources -- the author's own readme says he took them from
+`/usr/sys/amiga/boot`, replaced device I/O with DOS, and converted the assembler from SGS to MIT
+syntax for GCC -- so the files in it still carry
+
+    Copyright (C) 1991, Commodore Business Machines, Inc.
+
+No licence is stated for Markus Wild's own work.
+
+Checked file by file, because the layering decides who could give permission for what: **all ten
+source files in the archive carry Commodore's 1991 header** -- `bind.c`, `bootdata.h`,
+`bootinfo.h`, `copyit.s`, `infoblock.h`, `rel.c`, `streq.c`, `streqn.c`, `Supervisor.s`,
+`unix_boot.c` -- and none carries Markus Wild's name.  `unix_boot.c` heads its notice "Original
+Code: Copyright (C) 1991, Commodore Business Machines, Inc.", which is the wording of someone who
+modified a file and kept the attribution.  His contribution is the modifications and the
+packaging; the file contents are Commodore's.  So permission from him would settle the licence of
+his own work, and would not by itself make these sources redistributable.  Between the two, nothing of `unix_boot` is
+redistributed here in any form beyond the diff context described below.  You must obtain the
+archive yourself and run `apply.sh` against your own copy.  The same applies to the AMIX ELF
+headers the build needs.
+
+The *prebuilt* `unix_boot` in Markus Wild's archive requires `arp.library` at run time, and his
+readme lists it as a requirement.  The sources do not reference it and neither does the binary
+built from them here: measured, zero references to `arp.library` or `ArpBase` in `unix_boot040`
+and in a fresh build, against three in the shipped executable.  The requirement therefore belongs
+to the original binary, not to this.
+
+How much of the original this repository contains -- measured, 2026-08-18
+-------------------------------------------------------------------------
+A unified diff reproduces the lines it removes, and the context lines around each change so that
+`patch` can locate the hunk.  That is original text, and an earlier version of this NOTICE claimed
+there was none of it.  Measured now:
+
+    file           original   lines of it in this repository
+    copyit.s          70           0   -- rebuilt, not patched; see below
+    unix_boot.c      252          62
+    rel.c            434          29
+    bind.c            47           7
+    Makefile          19           6
+
+Two corrections to the 2026-08-15 table, both found while re-measuring.  It counted every line
+of each patch beginning with a space or a hyphen, which also matches the `--- filename` header --
+so each figure was one too high.  And it omitted `Makefile`, which is patched like the others.
+The counts above exclude diff headers and hunk markers.  `unix_boot.c` rose by two genuine
+context lines when a bounds check was added to the memory-region loop.
+
+`copyit.s` was the reason the claim was false: the change replaces the 68030 MMU-disable sequence
+wholesale, so a diff removes 40 of its 70 lines and carries the rest as context -- 71 of 70 lines
+at three lines of context, 60 at one, 40 at zero.  No diff setting fixes that.
+
+It is therefore **not a patch any more**.  `transforms/transform_copyit.py` rebuilds the file:
+the script holds our own text and the line numbers of what survives, and reads those surviving
+lines out of your copy.  It verifies the input's sha256 before writing anything and the result's
+sha256 after, so a wrong input fails loudly instead of silently keeping the wrong lines.
+Verified end to end: run against a clean extraction it reproduces the previous patched file
+byte for byte, and the loader builds to the same binary.
+
+Two lines of the original remain in that script, both inside sequences we wrote:
+`movew #0x2700,sr`, which is the only way to mask interrupts, and a PC-relative `lea` of a data
+label the file keeps.  Single instructions dictated by the machine and by the surrounding code,
+recorded here rather than left for a reader to find.
+
+`unix_boot.c` was 129 lines, half the file, until the diff context was narrowed from three lines
+to one on 2026-08-15; verified the same way, byte-identical output from a clean extraction.
+
+The patches remain useless without the original sources, which you supply.
+
+A note on the model, because it is not ours
+--------------------------------------------
+The original author faced the same question and answered it the same way.  `README.BEFORE.BUILD!`
+in his archive says:
+
+    Since I didn't want to risk any Copyright war with AT&T, I didn't include the following
+    files into the include/ directory ... Just copy them from your SVR4 partition back into
+    this tree.
+
+He left AT&T's ELF headers out and told the reader to supply them from their own installation.
+That is exactly the arrangement this repository uses, arrived at independently and then found to
+have a precedent from the person who wrote the thing being patched.
+
+Two differences are worth stating plainly.  He was cautious about AT&T's headers while
+redistributing Commodore's boot sources, which says something about what was thought settled at
+the time rather than that it was.  And this repository is stricter than his: it ships patches
+rather than sources, so the reader supplies not only the AT&T headers but the loader itself.
+
+Hardware and architecture references
+------------------------------------
+The 68030/68040/68060 MMU-disable sequences in `transforms/transform_copyit.py` were written
+from Motorola's
+MC68040 and MC68060 user manuals.  No code was copied from any third-party operating system.
