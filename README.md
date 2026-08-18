@@ -100,8 +100,7 @@ or a warning that it is about to do exactly that.
 ## Disclaimer
 
 This is hobbyist work on a 34-year-old proprietary operating system. It is not affiliated with
-Commodore, AT&T or anyone else, it is not supported, and it is not for production use. It can
-render a machine unbootable; keep a copy of the original loader.
+Commodore, AT&T or anyone else, it is not supported, and it is not for production use.
 
 ## Requirements
 
