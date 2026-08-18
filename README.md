@@ -13,10 +13,6 @@ changed them to use DOS instead of device I/O, and converted the assembler files
 syntax so GCC could build them. That is why the files still carry Commodore's 1991 copyright
 header while the program as a whole is his.
 
-*(This README described the program as Commodore's until 2026-08-15. It was wrong, and the
-correction came from an Amiga historian rather than from the files — the Commodore headers inside
-the sources make the mistake an easy one to make and a hard one to notice.)*
-
 This repository ships **none of the original `unix_boot` source files**. Two independent
 reasons: every source file in the archive carries Commodore's 1991 copyright — checked, all ten
 of them, and none carries Markus Wild's name — and no licence is stated for his own work on
@@ -190,6 +186,20 @@ Hardware-verified as the loader for the **AMIX 68040/68060 Port** on an Amiga 30
   motherboard memory at `0x07000000` instead of the accelerator's `0x08000000`
 
 The patched loader is what every hardware acceptance run in the kernel project used.
+
+The build at the `v1.0-040-060` tag is `sha256 479c496e…` (`src/unix_boot040`, 39 308 bytes). It
+was booted on real hardware on 2026-08-18 — an Amiga 3000 with the 68060 Mercury card — and the
+machine came up normally.
+
+That is a regression result and should be read as one. The capacity checks on
+`bootinfo.autocon[]` and `memory[]` refuse to boot rather than overrun those arrays, and reaching
+either needs more than sixteen AutoConfig boards or sixteen memory regions — far more than an
+Amiga 3000 has. Those branches did not execute. What the boot establishes is that adding them did
+not disturb the path every machine actually takes.
+
+The 68060 is the more useful of the two CPUs to have run it on. `cputype` is poked into the kernel
+here, a few dozen lines below the changed code, and on a 68060 that poke is what stops every
+CPU-gated path in the kernel from running as a 68040. An 040 boot would have been silent about it.
 
 ## Related
 

@@ -34,6 +34,15 @@ operating system left underneath. There is no diagnostic layer below this code. 
 * **Never commit sources.** `.gitignore` excludes `src/`, `bin/`, `.extract/`, `*.lha` and the
   local build area for a reason, and the reason is in `NOTICE`. If a build step wants a file
   tracked, that is a bug in the build step.
+* **A file that is untracked but *not* ignored is the dangerous state**, and it does not look
+  dangerous. It sits quietly outside every check that reads the index, and then `git add -A`
+  sweeps it in. `local-worktree/` is 3.7 MB of the reader's own extracted sources — the whole
+  original of every file this repository is careful not to carry — and one missing `.gitignore`
+  line is all that stands between it and a commit. Check before you stage:
+
+  ```sh
+  git ls-files --others --exclude-standard    # must print nothing
+  ```
 * **The patches are generated from a working tree. Never edit a `.patch` by hand.** A fix applied
   to generated output is reverted the next time it is regenerated — that has already happened
   here once. Fix the source, regenerate, and verify the result is byte-identical to what the old
@@ -84,9 +93,14 @@ the 68040 and 68060 cost the 68030, and that trade is deliberate but not permane
 ## Before you claim you are finished
 
 ```sh
-sh apply.sh /path/to/unix_boot.lha    # verifies the archive, patches, rebuilds copyit.s
-sh build.sh                           # -> src/unix_boot040
+git ls-files --others --exclude-standard   # nothing, or something is about to leak
+sh apply.sh /path/to/unix_boot.lha         # verifies the archive, patches, rebuilds copyit.s
+sh build.sh                                # -> src/unix_boot040
 ```
+
+Run the first one before you stage anything, not after. It is the only check here whose failure
+is silent and permanent: a build error you fix, but a source file pushed to a public repository
+is in someone's clone before you notice.
 
 Then check the two things a green build does not tell you: that the patched sources are
 byte-identical to what the previous patches produced, and that the resulting binary is unchanged
